@@ -264,6 +264,27 @@ CROSS_MARKETPLACE_RESOLUTION_HTML = """
 </html>
 """
 
+SKU_FALLBACK_HTML = """
+<html>
+  <body>
+    <section class="results">
+      <div class="product-card">
+        <a href="https://shop.example.com/lenovo-ideapad-slim-3/p/item111?pid=LAPX12345Z9">
+          Lenovo IdeaPad Slim 3 (16 GB/512 GB SSD/Windows 11)
+        </a>
+        <span class="price">₹59,990</span>
+      </div>
+      <div class="product-card">
+        <a href="https://shop.example.com/asus-vivobook-14/p/item222">
+          ASUS VivoBook 14 Model Number: UV3402A1234 (16 GB/512 GB SSD/Windows 11 Home)
+        </a>
+        <span class="price">₹64,990</span>
+      </div>
+    </section>
+  </body>
+</html>
+"""
+
 
 def test_parse_rows_prefers_product_cards_over_nav_items() -> None:
     fields = infer_fields("Extract title, price, rating, product URL")
@@ -647,8 +668,8 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     second = transformed_rows[1]
     assert second["product_family"] == "Motobook 60"
     assert second["model"] == "Motobook 60 Pro"
-    assert second["sku"] is None
-    assert second["sku_confidence"] is None
+    assert second["sku"] == "PID-COMBBB222"
+    assert second["sku_confidence"] == 0.45
     assert second["processor"] == "Intel Core Ultra 5 225H"
     assert second["display"] == "14 inch"
     assert second["os_family"] == "Windows"
@@ -663,8 +684,8 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     third = transformed_rows[2]
     assert third["product_family"] == "Motobook 14"
     assert third["model"] == "Motobook 14"
-    assert third["sku"] is None
-    assert third["sku_confidence"] is None
+    assert third["sku"] == "PID-COMCCC333"
+    assert third["sku_confidence"] == 0.45
     assert third["processor"] == "Intel Core 5 Series 2 210H"
     assert third["os_family"] == "Windows"
     assert third["os_version"] == "11"
@@ -792,7 +813,85 @@ def test_transform_structured_schema_assigns_stable_global_entity_across_marketp
     assert second["sku"] == "MC6V4HN-A"
     assert first["sku_confidence"] == 0.95
     assert second["sku_confidence"] == 0.95
+    assert first["parent_product_id"] == second["parent_product_id"]
+    assert first["variant_id"] == second["variant_id"]
+    assert first["canonical_product_id"] == second["canonical_product_id"]
     assert first["global_entity_id"] == second["global_entity_id"]
     assert first["cluster_id"] == second["cluster_id"]
     assert float(first["match_confidence"]) >= 0.9
     assert float(second["match_confidence"]) >= 0.9
+
+
+def test_transform_structured_schema_sku_fallback_from_pid_and_model_number_labels() -> None:
+    prompt = (
+        "Extract brand, category, model, ram, storage, processor, display, os, "
+        "price_inr, rating, review_count, availability, product_url"
+    )
+    fields = infer_fields(prompt)
+    rows, warnings = parse_rows_from_html(
+        html=SKU_FALLBACK_HTML,
+        base_url="https://shop.example.com/search?q=laptop",
+        fields=fields,
+        max_rows=10,
+    )
+    assert warnings == []
+    assert len(rows) == 2
+
+    _new_fields, transformed_rows, transform_warnings = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://shop.example.com/search?q=laptop",
+    )
+    assert transform_warnings == ["structured_product_schema_applied"]
+    assert len(transformed_rows) == 2
+
+    first = transformed_rows[0]
+    assert first["sku"] == "PID-LAPX12345Z9"
+    assert first["sku_confidence"] == 0.45
+
+    second = transformed_rows[1]
+    assert second["sku"] == "PART-UV3402A1234"
+    assert second["sku_confidence"] == 0.62
+
+
+def test_transform_structured_schema_entity_ids_are_deterministic_for_same_input() -> None:
+    prompt = (
+        "Extract brand, category, model, ram, storage, processor, display, os, "
+        "price_inr, rating, review_count, availability, product_url"
+    )
+    fields = infer_fields(prompt)
+    rows, warnings = parse_rows_from_html(
+        html=CROSS_MARKETPLACE_RESOLUTION_HTML,
+        base_url="https://example.com/search?q=macbook+air",
+        fields=fields,
+        max_rows=10,
+    )
+    assert warnings == []
+
+    _fields_1, transformed_rows_1, warnings_1 = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://example.com/search?q=macbook+air",
+    )
+    _fields_2, transformed_rows_2, warnings_2 = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://example.com/search?q=macbook+air",
+    )
+
+    assert warnings_1 == ["structured_product_schema_applied"]
+    assert warnings_2 == ["structured_product_schema_applied"]
+    assert len(transformed_rows_1) == len(transformed_rows_2)
+    assert [row["parent_product_id"] for row in transformed_rows_1] == [
+        row["parent_product_id"] for row in transformed_rows_2
+    ]
+    assert [row["variant_id"] for row in transformed_rows_1] == [row["variant_id"] for row in transformed_rows_2]
+    assert [row["canonical_product_id"] for row in transformed_rows_1] == [
+        row["canonical_product_id"] for row in transformed_rows_2
+    ]
+    assert [row["global_entity_id"] for row in transformed_rows_1] == [
+        row["global_entity_id"] for row in transformed_rows_2
+    ]

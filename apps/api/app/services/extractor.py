@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import re
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -93,6 +93,10 @@ PROCESSOR_RYZEN_PATTERN = re.compile(r"\b(?:AMD\s+)?Ryzen\s+(\d{3,5})\b", re.IGN
 REVIEW_COUNT_PATTERN = re.compile(r"\b(\d[\d,]*)\s*reviews?\b", re.IGNORECASE)
 SKU_PATTERN = re.compile(r"\b([A-Z]{2,}[A-Z0-9]{2,}(?:[/-][A-Z0-9]{1,})+)\b")
 SKU_NORMALIZED_PATTERN = re.compile(r"^[A-Z0-9]+(?:-[A-Z0-9]+)+$")
+PART_NUMBER_LABEL_PATTERN = re.compile(
+    r"\b(?:model\s*(?:no\.?|number)?|part\s*(?:no\.?|number)?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/-]{3,})\b",
+    re.IGNORECASE,
+)
 PROCESSOR_TRAIL_PATTERN = re.compile(
     r"\b(?:Apple\s+M[1-5](?:\s*(?:Pro|Max|Ultra))?|Intel\s+Core\s+[^,()/]+|AMD\s+Ryzen\s+\d+[A-Za-z0-9-]*)\b",
     re.IGNORECASE,
@@ -892,7 +896,12 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
     brand = _extract_brand(title=title, slug=slug)
     category = _infer_category(title=title, slug=slug, page_url=page_url)
     processor = _extract_processor(title=title, slug=slug, brand=brand, source_text=source_text)
-    sku, sku_confidence = _extract_sku_with_confidence(title=title, slug=slug, source_text=source_text)
+    sku, sku_confidence = _extract_sku_with_confidence(
+        title=title,
+        slug=slug,
+        source_text=source_text,
+        raw_product_url=raw_product_url,
+    )
     model = _extract_model(title=title, brand=brand, processor=processor, sku=sku)
     product_family = _extract_product_family(model=model, brand=brand)
     is_canonical_name, name_source = _infer_name_canonicality(
@@ -1053,11 +1062,12 @@ def _enrich_structured_catalog_rows(rows: list[dict[str, object]]) -> list[dict[
 
     cluster_registry: dict[str, str] = {}
     global_registry: dict[str, str] = {}
+    sku_overrides = _build_sku_identity_overrides(rows)
     enriched_rows: list[dict[str, object]] = []
 
     for row in rows:
         enriched = dict(row)
-        parent_key = _parent_identity_key(enriched)
+        parent_key = _parent_identity_key(enriched, sku_overrides=sku_overrides)
         variant_key = _variant_identity_key(enriched, parent_key=parent_key)
         canonical_key = _canonical_identity_key(enriched, parent_key=parent_key, variant_key=variant_key)
         cluster_key, cluster_confidence = _cluster_identity_and_confidence(enriched)
@@ -1084,6 +1094,10 @@ def _enrich_structured_catalog_rows(rows: list[dict[str, object]]) -> list[dict[
         enriched["cluster_confidence"] = cluster_confidence
         enriched["global_entity_id"] = global_entity_id
         enriched["match_confidence"] = match_confidence
+        enriched["os"] = _compose_os_label(
+            os_family=enriched.get("os_family") if isinstance(enriched.get("os_family"), str) else None,
+            os_version=enriched.get("os_version") if isinstance(enriched.get("os_version"), str) else None,
+        )
         enriched_rows.append(enriched)
 
     return enriched_rows
@@ -1095,11 +1109,48 @@ def _stable_identity_id(prefix: str, raw_key: str) -> str:
     return f"{prefix}_{digest}"
 
 
-def _parent_identity_key(row: dict[str, object]) -> str:
+def _build_sku_identity_overrides(rows: list[dict[str, object]]) -> dict[str, tuple[str, str]]:
+    overrides: dict[str, tuple[str, str, float]] = {}
+    for row in rows:
+        if not _is_strong_sku(row):
+            continue
+        sku = _identity_part(row.get("sku"))
+        if not sku:
+            continue
+
+        family = _identity_part(row.get("product_family"))
+        model = _identity_part(row.get("model"))
+        score = 0.0
+        score += 0.3 if family else 0.0
+        score += 0.5 if model else 0.0
+        score += min(len(model), 40) / 200.0
+        if row.get("name_source") == "catalog_pattern":
+            score += 0.2
+
+        previous = overrides.get(sku)
+        if previous is None or score > previous[2]:
+            overrides[sku] = (family, model, score)
+
+    return {key: (value[0], value[1]) for key, value in overrides.items()}
+
+
+def _parent_identity_key(
+    row: dict[str, object],
+    sku_overrides: dict[str, tuple[str, str]] | None = None,
+) -> str:
     brand = _identity_part(row.get("brand"))
     category = _identity_part(row.get("category"))
-    family = _identity_part(row.get("product_family"))
-    model = _identity_part(row.get("model"))
+    family = _normalize_parent_family(_identity_part(row.get("product_family")), brand=brand)
+    model = _normalize_parent_model(_identity_part(row.get("model")), family=family, brand=brand)
+
+    if sku_overrides and _is_strong_sku(row):
+        sku = _identity_part(row.get("sku"))
+        if sku in sku_overrides:
+            override_family, override_model = sku_overrides[sku]
+            if override_family:
+                family = _normalize_parent_family(override_family, brand=brand)
+            if override_model:
+                model = _normalize_parent_model(override_model, family=family, brand=brand)
 
     if not family and model:
         family = model
@@ -1112,6 +1163,81 @@ def _parent_identity_key(row: dict[str, object]) -> str:
     return "|".join((brand, category, family, model))
 
 
+def _normalize_parent_family(value: str, brand: str) -> str:
+    if not value:
+        return ""
+
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    if brand == "apple":
+        if "macbook neo" in normalized:
+            return "macbook neo"
+        if "macbook air" in normalized:
+            return "macbook air"
+        if "macbook pro" in normalized:
+            return "macbook pro"
+        if "macbook" in normalized:
+            return "macbook"
+
+    galaxy = re.search(r"\bgalaxy\s+book(\d+)\b", normalized)
+    if galaxy:
+        return f"galaxy book{galaxy.group(1)}"
+
+    moto = re.search(r"\bmotobook\s+(\d+)\b", normalized)
+    if moto:
+        return f"motobook {moto.group(1)}"
+
+    words = normalized.split()
+    return " ".join(words[:3])
+
+
+def _normalize_parent_model(value: str, family: str, brand: str) -> str:
+    if not value:
+        return family or ""
+
+    normalized = value.lower()
+    normalized = re.sub(r"[\(\)\[\]/,]", " ", normalized)
+    normalized = re.sub(r"\b20\d{2}\b", " ", normalized)
+    normalized = re.sub(r"\b\d{1,2}(?:\.\d+)?\s*(?:inch|inches|in)\b", " ", normalized)
+    normalized = re.sub(r"\b(?:laptop|notebook|computer|pc)\b", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    if brand == "apple":
+        family_match = re.search(r"\bmacbook\s+(neo|air|pro)\b", normalized)
+        if family_match:
+            chip_m = re.search(r"\bm([1-9])\b", normalized)
+            chip_a = re.search(r"\ba(\d{1,2})(?:\s*pro)?\b", normalized)
+            base = f"macbook {family_match.group(1)}"
+            if chip_m:
+                return f"{base} m{chip_m.group(1)}"
+            if chip_a:
+                suffix = f"a{chip_a.group(1)}"
+                if re.search(r"\ba\d{1,2}\s*pro\b", normalized):
+                    suffix = f"{suffix} pro"
+                return f"{base} {suffix}"
+            return base
+
+    galaxy = re.search(r"\bgalaxy\s+book(\d+)\b", normalized)
+    if galaxy:
+        return f"galaxy book{galaxy.group(1)}"
+
+    moto = re.search(r"\bmotobook\s+(\d+)(?:\s+pro)?\b", normalized)
+    if moto:
+        if " pro" in normalized:
+            return f"motobook {moto.group(1)} pro"
+        return f"motobook {moto.group(1)}"
+
+    words = normalized.split()
+    return " ".join(words[:6])
+
+
+def _is_strong_sku(row: dict[str, object]) -> bool:
+    sku = _identity_part(row.get("sku"))
+    score = _safe_float(row.get("sku_confidence"))
+    return bool(sku and score is not None and score >= 0.9)
+
+
 def _variant_identity_key(row: dict[str, object], parent_key: str) -> str:
     ram = _identity_part(row.get("ram"))
     storage = _identity_part(row.get("storage"))
@@ -1122,6 +1248,9 @@ def _variant_identity_key(row: dict[str, object], parent_key: str) -> str:
     sku_conf = _safe_float(row.get("sku_confidence"))
     sku = _identity_part(row.get("sku")) if sku_conf is not None and sku_conf >= 0.9 else ""
     price_band = _price_band(row.get("price_inr"))
+
+    if sku:
+        return "|".join((parent_key, "sku", sku))
 
     specs = [ram, storage, processor, display, os_family, os_version, sku]
     if not any(specs):
@@ -1414,11 +1543,21 @@ def _extract_product_family(model: str, brand: str) -> str | None:
 
 
 def _extract_sku(title: str, slug: str, source_text: str = "") -> str | None:
-    sku, _confidence = _extract_sku_with_confidence(title=title, slug=slug, source_text=source_text)
+    sku, _confidence = _extract_sku_with_confidence(
+        title=title,
+        slug=slug,
+        source_text=source_text,
+        raw_product_url="",
+    )
     return sku
 
 
-def _extract_sku_with_confidence(title: str, slug: str, source_text: str = "") -> tuple[str | None, float | None]:
+def _extract_sku_with_confidence(
+    title: str,
+    slug: str,
+    source_text: str = "",
+    raw_product_url: str = "",
+) -> tuple[str | None, float | None]:
     haystack = f"{source_text} {title}"
     match = SKU_PATTERN.search(haystack)
     if match:
@@ -1427,6 +1566,19 @@ def _extract_sku_with_confidence(title: str, slug: str, source_text: str = "") -
             return None, None
         confidence = 0.95 if SKU_NORMALIZED_PATTERN.match(normalized) else 0.85
         return normalized, confidence
+
+    labeled_match = PART_NUMBER_LABEL_PATTERN.search(haystack)
+    if labeled_match:
+        raw_candidate = _clean_text(labeled_match.group(1)).upper()
+        normalized = _normalize_sku(raw_candidate)
+        if normalized:
+            return normalized, 0.78
+
+        compact = re.sub(r"[^A-Z0-9]", "", raw_candidate)
+        if len(compact) >= 6:
+            normalized = _normalize_sku(f"PART-{compact}")
+            if normalized:
+                return normalized, 0.62
 
     # Fallback from URL slug tail (common marketplace part-number format).
     tokens = [token for token in slug.split("-") if token]
@@ -1447,14 +1599,29 @@ def _extract_sku_with_confidence(title: str, slug: str, source_text: str = "") -
             "home",
             "pro",
         }
-        if candidate_left.lower() in stopwords:
-            return None, None
-        if re.fullmatch(r"(?=[a-z0-9-]*\d)[a-z]{2,}[a-z0-9]{3,}-[a-z0-9]{1,8}", candidate, flags=re.IGNORECASE):
+        if candidate_left.lower() not in stopwords and re.fullmatch(
+            r"(?=[a-z0-9-]*\d)[a-z]{2,}[a-z0-9]{3,}-[a-z0-9]{1,8}",
+            candidate,
+            flags=re.IGNORECASE,
+        ):
             left_upper = candidate_left.upper()
             right_upper = candidate_right.upper()
             normalized = _normalize_sku(f"{left_upper}-{right_upper}")
             if normalized:
                 return normalized, 0.7
+
+    if raw_product_url:
+        parsed = urlparse(raw_product_url)
+        query_map = parse_qs(parsed.query)
+        pid_candidates = query_map.get("pid", []) + query_map.get("product_id", [])
+        for pid in pid_candidates:
+            compact_pid = re.sub(r"[^A-Z0-9]", "", pid.upper())
+            if len(compact_pid) < 6:
+                continue
+            normalized = _normalize_sku(f"PID-{compact_pid}")
+            if normalized:
+                return normalized, 0.45
+
     return None, None
 
 

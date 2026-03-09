@@ -20,7 +20,7 @@ export default function NewScrapePage() {
   const [hasSession, setHasSession] = useState<boolean | null>(null);
   const [url, setUrl] = useState("https://example.com/search?q=shoes");
   const [prompt, setPrompt] = useState(
-    "Extract brand, category, product_family, model, sku, sku_confidence, ram, storage, processor, display, os_family, os_version, os, is_canonical_name, name_source, price_inr, rating, review_count, review_scope, review_count_timestamp, availability, product_url",
+    "Extract brand, category, product_family, model, parent_product_id, variant_id, canonical_product_id, cluster_id, cluster_confidence, global_entity_id, match_confidence, sku, sku_confidence, ram, storage, processor, display, os_family, os_version, os, is_canonical_name, name_source, price_inr, rating, review_count, review_scope, review_count_timestamp, availability, product_url",
   );
   const [maxRows, setMaxRows] = useState(20);
   const [maxPages, setMaxPages] = useState(5);
@@ -210,7 +210,7 @@ export default function NewScrapePage() {
               rows={4}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Extract brand, category, product_family, model, sku, sku_confidence, ram, storage, processor, display, os_family, os_version, os, is_canonical_name, name_source, price_inr, rating, review_count, review_scope, review_count_timestamp, availability, product_url"
+              placeholder="Extract brand, category, product_family, model, parent_product_id, variant_id, canonical_product_id, cluster_id, cluster_confidence, global_entity_id, match_confidence, sku, sku_confidence, ram, storage, processor, display, os_family, os_version, os, is_canonical_name, name_source, price_inr, rating, review_count, review_scope, review_count_timestamp, availability, product_url"
             />
           </label>
 

@@ -24,6 +24,13 @@ STRUCTURED_PRODUCT_FIELDS = [
     ("category", "text"),
     ("product_family", "text"),
     ("model", "text"),
+    ("parent_product_id", "text"),
+    ("variant_id", "text"),
+    ("canonical_product_id", "text"),
+    ("cluster_id", "text"),
+    ("cluster_confidence", "number"),
+    ("global_entity_id", "text"),
+    ("match_confidence", "number"),
     ("sku", "text"),
     ("sku_confidence", "number"),
     ("ram", "text"),
@@ -852,6 +859,7 @@ def transform_rows_for_prompt_schema(
         transformed.append(_build_structured_product_row(row=row, page_url=page_url))
 
     deduped = _dedupe_structured_product_rows(transformed)
+    deduped = _enrich_structured_catalog_rows(deduped)
     warnings = ["structured_product_schema_applied"]
     if len(deduped) < len(transformed):
         warnings.append("structured_product_rows_deduped")
@@ -902,7 +910,7 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
         brand=brand,
         source_text=source_text,
     )
-    os_name = os_family
+    os_name = _compose_os_label(os_family=os_family, os_version=os_version)
     price_inr = _extract_price_inr(row.get("price"))
     rating = _extract_numeric_rating(row.get("rating"))
     if rating is None:
@@ -924,6 +932,13 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
         "category": category,
         "product_family": product_family,
         "model": model,
+        "parent_product_id": None,
+        "variant_id": None,
+        "canonical_product_id": None,
+        "cluster_id": None,
+        "cluster_confidence": None,
+        "global_entity_id": None,
+        "match_confidence": None,
         "sku": sku,
         "sku_confidence": sku_confidence,
         "ram": ram,
@@ -948,8 +963,8 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
 def _dedupe_structured_product_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     # Keep one canonical row per logical variant identity.
     # This intentionally ignores per-seller SKU URL differences.
-    deduped: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
-    order: list[tuple[str, str, str, str, str]] = []
+    deduped: dict[tuple[str, str, str, str, str, str], dict[str, object]] = {}
+    order: list[tuple[str, str, str, str, str, str]] = []
 
     for row in rows:
         key = (
@@ -958,6 +973,7 @@ def _dedupe_structured_product_rows(rows: list[dict[str, object]]) -> list[dict[
             _normalize_signature_value(row.get("model")),
             _normalize_signature_value(row.get("ram")),
             _normalize_signature_value(row.get("storage")),
+            _normalize_signature_value(row.get("processor")),
         )
         existing = deduped.get(key)
         if existing is None:
@@ -978,6 +994,13 @@ def _merge_structured_rows(existing: dict[str, object], incoming: dict[str, obje
         "category",
         "product_family",
         "model",
+        "parent_product_id",
+        "variant_id",
+        "canonical_product_id",
+        "cluster_id",
+        "cluster_confidence",
+        "global_entity_id",
+        "match_confidence",
         "sku",
         "sku_confidence",
         "ram",
@@ -1022,6 +1045,229 @@ def _merge_structured_rows(existing: dict[str, object], incoming: dict[str, obje
         if _is_blank_value(existing_value) and not _is_blank_value(incoming_value):
             merged[field] = incoming_value
     return merged
+
+
+def _enrich_structured_catalog_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not rows:
+        return rows
+
+    cluster_registry: dict[str, str] = {}
+    global_registry: dict[str, str] = {}
+    enriched_rows: list[dict[str, object]] = []
+
+    for row in rows:
+        enriched = dict(row)
+        parent_key = _parent_identity_key(enriched)
+        variant_key = _variant_identity_key(enriched, parent_key=parent_key)
+        canonical_key = _canonical_identity_key(enriched, parent_key=parent_key, variant_key=variant_key)
+        cluster_key, cluster_confidence = _cluster_identity_and_confidence(enriched)
+        global_key, match_confidence = _global_identity_and_confidence(enriched)
+
+        parent_product_id = _stable_identity_id("pp", parent_key)
+        variant_id = _stable_identity_id("var", variant_key)
+        canonical_product_id = _stable_identity_id("cpv1", canonical_key)
+
+        cluster_id = cluster_registry.get(cluster_key)
+        if not cluster_id:
+            cluster_id = _stable_identity_id("clu", cluster_key)
+            cluster_registry[cluster_key] = cluster_id
+
+        global_entity_id = global_registry.get(global_key)
+        if not global_entity_id:
+            global_entity_id = _stable_identity_id("ge", global_key)
+            global_registry[global_key] = global_entity_id
+
+        enriched["parent_product_id"] = parent_product_id
+        enriched["variant_id"] = variant_id
+        enriched["canonical_product_id"] = canonical_product_id
+        enriched["cluster_id"] = cluster_id
+        enriched["cluster_confidence"] = cluster_confidence
+        enriched["global_entity_id"] = global_entity_id
+        enriched["match_confidence"] = match_confidence
+        enriched_rows.append(enriched)
+
+    return enriched_rows
+
+
+def _stable_identity_id(prefix: str, raw_key: str) -> str:
+    payload = raw_key.strip() if raw_key else "unknown"
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{digest}"
+
+
+def _parent_identity_key(row: dict[str, object]) -> str:
+    brand = _identity_part(row.get("brand"))
+    category = _identity_part(row.get("category"))
+    family = _identity_part(row.get("product_family"))
+    model = _identity_part(row.get("model"))
+
+    if not family and model:
+        family = model
+    if not model and family:
+        model = family
+
+    fallback = _identity_part(row.get("product_url"))
+    if not any((brand, category, family, model)):
+        return f"unknown|{fallback}"
+    return "|".join((brand, category, family, model))
+
+
+def _variant_identity_key(row: dict[str, object], parent_key: str) -> str:
+    ram = _identity_part(row.get("ram"))
+    storage = _identity_part(row.get("storage"))
+    processor = _identity_part(row.get("processor"))
+    display = _identity_part(row.get("display"))
+    os_family = _identity_part(row.get("os_family"))
+    os_version = _identity_part(row.get("os_version"))
+    sku_conf = _safe_float(row.get("sku_confidence"))
+    sku = _identity_part(row.get("sku")) if sku_conf is not None and sku_conf >= 0.9 else ""
+    price_band = _price_band(row.get("price_inr"))
+
+    specs = [ram, storage, processor, display, os_family, os_version, sku]
+    if not any(specs):
+        specs = [_model_signature(row.get("model")), price_band]
+
+    return "|".join([parent_key, *specs, price_band])
+
+
+def _canonical_identity_key(row: dict[str, object], parent_key: str, variant_key: str) -> str:
+    category = _identity_part(row.get("category"))
+    canonical_marker = "canon" if row.get("is_canonical_name") else "market"
+    return "|".join(("v1", category, parent_key, variant_key, canonical_marker))
+
+
+def _cluster_identity_and_confidence(row: dict[str, object]) -> tuple[str, float]:
+    brand = _identity_part(row.get("brand"))
+    sku_conf = _safe_float(row.get("sku_confidence"))
+    sku = _identity_part(row.get("sku")) if sku_conf is not None and sku_conf >= 0.9 else ""
+    if sku:
+        key = "|".join(("sku", brand, sku))
+        confidence = 0.99 if row.get("name_source") == "catalog_pattern" else 0.95
+        return key, round(_clamp(confidence, 0.55, 0.99), 2)
+
+    model_signature = _model_signature(row.get("model"))
+    ram = _identity_part(row.get("ram"))
+    storage = _identity_part(row.get("storage"))
+    processor = _identity_part(row.get("processor"))
+    display = _identity_part(row.get("display"))
+    price_band = _price_band(row.get("price_inr"))
+
+    has_exact_variant = bool(brand and model_signature and ram and storage)
+    has_extended_specs = bool(processor or display)
+
+    if has_exact_variant:
+        key = "|".join(("exact", brand, model_signature, ram, storage, processor, display))
+        confidence = 0.94 + (0.03 if has_extended_specs else 0.0)
+    else:
+        key = "|".join(("fuzzy", brand, model_signature, ram, storage, price_band))
+        confidence = 0.72
+        if brand and model_signature:
+            confidence += 0.08
+        if ram or storage:
+            confidence += 0.05
+
+    if row.get("is_canonical_name") is False:
+        confidence -= 0.05
+    return key, round(_clamp(confidence, 0.55, 0.99), 2)
+
+
+def _global_identity_and_confidence(row: dict[str, object]) -> tuple[str, float]:
+    brand = _identity_part(row.get("brand"))
+    family = _identity_part(row.get("product_family"))
+    model_signature = _model_signature(row.get("model"))
+    ram = _identity_part(row.get("ram"))
+    storage = _identity_part(row.get("storage"))
+    processor = _identity_part(row.get("processor"))
+    display = _identity_part(row.get("display"))
+    price_band = _price_band(row.get("price_inr"))
+    sku_conf = _safe_float(row.get("sku_confidence"))
+    sku = _identity_part(row.get("sku")) if sku_conf is not None and sku_conf >= 0.9 else ""
+
+    if sku:
+        key = "|".join(("sku", brand, sku))
+    else:
+        key = "|".join(("spec", brand, family, model_signature, ram, storage, processor, display, price_band))
+
+    score = 0.0
+    score += 0.2 if brand else 0.0
+    score += 0.12 if family else 0.0
+    score += 0.2 if model_signature else 0.0
+    score += 0.08 if ram else 0.0
+    score += 0.08 if storage else 0.0
+    score += 0.12 if processor else 0.0
+    score += 0.05 if display else 0.0
+    score += 0.03 if price_band else 0.0
+
+    if sku:
+        score += 0.18
+    elif _identity_part(row.get("sku")):
+        score += 0.07
+
+    if row.get("name_source") == "catalog_pattern":
+        score += 0.05
+    if row.get("is_canonical_name") is False:
+        score -= 0.05
+
+    return key, round(_clamp(score, 0.5, 0.99), 2)
+
+
+def _identity_part(value: object) -> str:
+    if value is None:
+        return ""
+    text = _clean_text(str(value)).lower()
+    return text
+
+
+def _model_signature(value: object) -> str:
+    raw = _identity_part(value)
+    if not raw:
+        return ""
+
+    tokens = re.findall(r"[a-z0-9]+", raw)
+    stopwords = {
+        "laptop",
+        "notebook",
+        "computer",
+        "pc",
+        "with",
+        "and",
+        "full",
+        "metal",
+        "oled",
+        "display",
+    }
+    filtered = [token for token in tokens if token not in stopwords]
+    return "-".join(filtered[:8])
+
+
+def _price_band(value: object) -> str:
+    numeric = _extract_price_inr(value)
+    if numeric is None:
+        return ""
+    lower = (numeric // 10000) * 10000
+    upper = lower + 9999
+    return f"{lower // 1000}k-{upper // 1000}k"
+
+
+def _safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value
 
 
 def _canonical_product_url(value: str) -> str:
@@ -1144,6 +1390,9 @@ def _extract_product_family(model: str, brand: str) -> str | None:
         return None
 
     if brand.lower() == "apple":
+        neo_match = re.search(r"\bMacBook\s+Neo\b", model, flags=re.IGNORECASE)
+        if neo_match:
+            return "MacBook Neo"
         mac_match = re.search(r"\bMacBook\s+(Air|Pro)\b", model, flags=re.IGNORECASE)
         if mac_match:
             return f"MacBook {mac_match.group(1).title()}"
@@ -1303,7 +1552,7 @@ def _extract_os_parts(
     windows_match = WINDOWS_OS_PATTERN.search(haystack)
     if windows_match:
         family = "Windows"
-        version = f"Windows {windows_match.group(1)}"
+        version = windows_match.group(1)
         edition = windows_match.group(2)
         if edition:
             version = f"{version} {edition.title()}"
@@ -1344,6 +1593,14 @@ def _normalize_os_release(value: str) -> str:
         "sequoia": "Sequoia",
     }
     return mapping.get(normalized, normalized.title())
+
+
+def _compose_os_label(os_family: str | None, os_version: str | None) -> str | None:
+    if not os_family:
+        return None
+    if not os_version:
+        return os_family
+    return f"{os_family} {os_version}"
 
 
 def _extract_structured_availability(row: dict[str, object], source_text: str = "") -> str | None:

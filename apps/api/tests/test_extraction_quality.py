@@ -243,6 +243,27 @@ APPLE_M5_MODEL_HTML = """
 </html>
 """
 
+CROSS_MARKETPLACE_RESOLUTION_HTML = """
+<html>
+  <body>
+    <section class="results">
+      <div class="product-card">
+        <a href="https://www.flipkart.com/apple-macbook-air-m4-24-gb-512-gb-ssd-macos-sequoia-mc6v4hn-a/p/itm482836944277e?pid=COMAAA111">
+          Apple MacBook Air M4 - MC6V4HN/A (24 GB/512 GB SSD/macOS Sequoia/33.02 cm (13 inch) Display)
+        </a>
+        <span class="price">₹1,32,990</span>
+      </div>
+      <div class="product-card">
+        <a href="https://www.amazon.in/apple-macbook-air-13-inch-mc6v4hn-a/dp/B0TEST1234?tag=tracking123">
+          Apple MacBook Air Laptop - MC6V4HN/A (24 GB/512 GB SSD/macOS Sequoia/13 inch Display)
+        </a>
+        <span class="price">₹1,33,990</span>
+      </div>
+    </section>
+  </body>
+</html>
+"""
+
 
 def test_parse_rows_prefers_product_cards_over_nav_items() -> None:
     fields = infer_fields("Extract title, price, rating, product URL")
@@ -412,6 +433,13 @@ def test_transform_rows_for_structured_product_schema() -> None:
         "category",
         "product_family",
         "model",
+        "parent_product_id",
+        "variant_id",
+        "canonical_product_id",
+        "cluster_id",
+        "cluster_confidence",
+        "global_entity_id",
+        "match_confidence",
         "sku",
         "sku_confidence",
         "ram",
@@ -436,8 +464,15 @@ def test_transform_rows_for_structured_product_schema() -> None:
     first = transformed_rows[0]
     assert first["brand"] == "Apple"
     assert first["category"] == "laptop"
-    assert first["product_family"] == "MacBook"
+    assert first["product_family"] == "MacBook Neo"
     assert first["model"] == "MacBook Neo A18 Pro"
+    assert str(first["parent_product_id"]).startswith("pp_")
+    assert str(first["variant_id"]).startswith("var_")
+    assert str(first["canonical_product_id"]).startswith("cpv1_")
+    assert str(first["cluster_id"]).startswith("clu_")
+    assert str(first["global_entity_id"]).startswith("ge_")
+    assert 0.55 <= float(first["cluster_confidence"]) <= 0.99
+    assert 0.5 <= float(first["match_confidence"]) <= 0.99
     assert first["sku"] == "MHFA4HN-A"
     assert first["sku_confidence"] == 0.7
     assert first["ram"] == "8 GB"
@@ -461,7 +496,14 @@ def test_transform_rows_for_structured_product_schema() -> None:
     )
 
     second = transformed_rows[1]
-    assert second["product_family"] == "MacBook"
+    assert second["product_family"] == "MacBook Neo"
+    assert str(second["parent_product_id"]).startswith("pp_")
+    assert str(second["variant_id"]).startswith("var_")
+    assert str(second["canonical_product_id"]).startswith("cpv1_")
+    assert str(second["cluster_id"]).startswith("clu_")
+    assert str(second["global_entity_id"]).startswith("ge_")
+    assert 0.55 <= float(second["cluster_confidence"]) <= 0.99
+    assert 0.5 <= float(second["match_confidence"]) <= 0.99
     assert second["sku"] == "MHFE4HN-A"
     assert second["sku_confidence"] == 0.7
     assert second["ram"] == "8 GB"
@@ -482,6 +524,10 @@ def test_transform_rows_for_structured_product_schema() -> None:
         second["product_url"]
         == "https://www.flipkart.com/apple-macbook-neo-a18-pro-2026-pro-8-gb-512-gb-ssd-tahoe-mhfe4hn-a/p/itm97a16be54dbaf"
     )
+    assert first["parent_product_id"] == second["parent_product_id"]
+    assert first["variant_id"] != second["variant_id"]
+    assert first["canonical_product_id"] != second["canonical_product_id"]
+    assert first["global_entity_id"] != second["global_entity_id"]
 
 
 def test_transform_structured_schema_extracts_display_rating_and_reviews_from_raw_text() -> None:
@@ -590,7 +636,7 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert first["display"] == "13 inch"
     assert first["os_family"] == "macOS"
     assert first["os_version"] == "Sequoia"
-    assert first["os"] == "macOS"
+    assert first["os"] == "macOS Sequoia"
     assert first["is_canonical_name"] is True
     assert first["name_source"] == "catalog_pattern"
     assert first["rating"] == 4.8
@@ -606,8 +652,8 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert second["processor"] == "Intel Core Ultra 5 225H"
     assert second["display"] == "14 inch"
     assert second["os_family"] == "Windows"
-    assert second["os_version"] == "Windows 11 Home"
-    assert second["os"] == "Windows"
+    assert second["os_version"] == "11 Home"
+    assert second["os"] == "Windows 11 Home"
     assert second["is_canonical_name"] is True
     assert second["name_source"] == "catalog_pattern"
     assert second["review_count"] == 128
@@ -621,8 +667,8 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert third["sku_confidence"] is None
     assert third["processor"] == "Intel Core 5 Series 2 210H"
     assert third["os_family"] == "Windows"
-    assert third["os_version"] == "Windows 11"
-    assert third["os"] == "Windows"
+    assert third["os_version"] == "11"
+    assert third["os"] == "Windows 11"
     assert third["is_canonical_name"] is True
     assert third["name_source"] == "catalog_pattern"
 
@@ -659,7 +705,7 @@ def test_transform_structured_schema_cleans_model_sku_and_processor_regressions(
     assert first["display"] == "13.6 inch"
     assert first["os_family"] == "macOS"
     assert first["os_version"] == "Sequoia"
-    assert first["os"] == "macOS"
+    assert first["os"] == "macOS Sequoia"
     assert first["is_canonical_name"] is True
     assert first["name_source"] == "catalog_pattern"
 
@@ -673,8 +719,8 @@ def test_transform_structured_schema_cleans_model_sku_and_processor_regressions(
     assert second["processor"] == "Intel Core i5"
     assert second["display"] == "15.6 inch"
     assert second["os_family"] == "Windows"
-    assert second["os_version"] == "Windows 11 Home"
-    assert second["os"] == "Windows"
+    assert second["os_version"] == "11 Home"
+    assert second["os"] == "Windows 11 Home"
     assert second["is_canonical_name"] is True
     assert second["name_source"] == "catalog_pattern"
 
@@ -713,3 +759,40 @@ def test_transform_structured_schema_keeps_apple_m_series_in_model() -> None:
     assert row["os_version"] == "Sequoia"
     assert row["is_canonical_name"] is True
     assert row["name_source"] == "catalog_pattern"
+
+
+def test_transform_structured_schema_assigns_stable_global_entity_across_marketplaces_with_same_sku() -> None:
+    prompt = (
+        "Extract brand, category, model, ram, storage, processor, display, os, "
+        "price_inr, rating, review_count, availability, product_url"
+    )
+    fields = infer_fields(prompt)
+    rows, warnings = parse_rows_from_html(
+        html=CROSS_MARKETPLACE_RESOLUTION_HTML,
+        base_url="https://example.com/search?q=macbook+air",
+        fields=fields,
+        max_rows=10,
+    )
+    assert warnings == []
+    assert len(rows) == 2
+
+    _new_fields, transformed_rows, transform_warnings = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://example.com/search?q=macbook+air",
+    )
+    assert transform_warnings == ["structured_product_schema_applied"]
+    assert len(transformed_rows) == 2
+
+    first = transformed_rows[0]
+    second = transformed_rows[1]
+
+    assert first["sku"] == "MC6V4HN-A"
+    assert second["sku"] == "MC6V4HN-A"
+    assert first["sku_confidence"] == 0.95
+    assert second["sku_confidence"] == 0.95
+    assert first["global_entity_id"] == second["global_entity_id"]
+    assert first["cluster_id"] == second["cluster_id"]
+    assert float(first["match_confidence"]) >= 0.9
+    assert float(second["match_confidence"]) >= 0.9

@@ -1,0 +1,7 @@
+{
+  "/new-scrape/page": "app/new-scrape/page.js",
+  "/templates/page": "app/templates/page.js",
+  "/jobs/page": "app/jobs/page.js",
+  "/file-manager/page": "app/file-manager/page.js",
+  "/page": "app/page.js"
+}

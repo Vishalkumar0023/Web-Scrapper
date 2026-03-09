@@ -1,0 +1,49 @@
+name: Flaky Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: "How many times to rerun the API suite"
+        required: false
+        default: "3"
+  schedule:
+    - cron: "0 3 * * 1"
+
+jobs:
+  flaky-api:
+    name: Repeat API Suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      DATABASE_URL: sqlite+pysqlite:///./flaky.db
+      APP_STORE_BACKEND: postgres
+      APP_QUEUE_BACKEND: memory
+      APP_EMBEDDED_WORKER: false
+      APP_RATE_LIMIT_ENABLED: false
+      APP_AUTH_ENABLED: false
+      APP_STARTUP_CLEANUP_ENABLED: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Apply Migrations
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Run Flaky Check
+        run: |
+          REPEATS="${{ github.event.inputs.repeats || '3' }}"
+          cd ../..
+          ./infra/scripts/flaky-check.sh "$REPEATS" "tests"

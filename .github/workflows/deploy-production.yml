@@ -1,0 +1,23 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Deploy Secret
+        run: |
+          if [ -z "${{ secrets.PRODUCTION_DEPLOY_CMD }}" ]; then
+            echo "Missing PRODUCTION_DEPLOY_CMD secret."
+            echo "Set this secret to the command that deploys the API and web apps to production."
+            exit 1
+          fi
+
+      - name: Execute Deploy Command
+        run: ${{ secrets.PRODUCTION_DEPLOY_CMD }}

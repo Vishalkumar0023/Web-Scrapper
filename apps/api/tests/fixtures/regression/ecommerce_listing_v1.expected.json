@@ -1,0 +1,23 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "title": "Ultra Runner Shoes",
+      "price": "$49.99",
+      "rating": "4.6",
+      "product_url": "https://shop.example.com/item/ultra-runner-1"
+    },
+    {
+      "title": "Trail Blast Shoes",
+      "price": "$59.50",
+      "rating": "4.3",
+      "product_url": "https://shop.example.com/item/trail-blast-2"
+    },
+    {
+      "title": "City Walk Sneakers",
+      "price": "$39.00",
+      "rating": "4.1",
+      "product_url": "https://shop.example.com/item/city-walk-3"
+    }
+  ]
+}

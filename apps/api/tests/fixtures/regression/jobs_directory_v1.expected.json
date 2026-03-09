@@ -1,0 +1,23 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "title": "Senior Python Engineer",
+      "price": "USD 120,000",
+      "rating": "4.2",
+      "product_url": "https://jobs.example.com/jobs/py-1"
+    },
+    {
+      "title": "Backend Platform Engineer",
+      "price": "USD 110,500",
+      "rating": "4",
+      "product_url": "https://jobs.example.com/jobs/py-2"
+    },
+    {
+      "title": "Data Pipeline Developer",
+      "price": "USD 105,000",
+      "rating": "4.5",
+      "product_url": "https://jobs.example.com/jobs/py-3"
+    }
+  ]
+}

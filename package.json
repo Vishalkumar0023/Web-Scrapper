@@ -1,0 +1,9 @@
+{
+  "name": "webscrapper",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:web": "pnpm --filter webscrapper-web dev",
+    "build:web": "pnpm --filter webscrapper-web build"
+  }
+}

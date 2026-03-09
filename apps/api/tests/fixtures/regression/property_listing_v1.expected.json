@@ -1,0 +1,23 @@
+{
+  "warnings": [],
+  "rows": [
+    {
+      "title": "2 BHK Flat - Whitefield",
+      "price": "INR 75,00,000",
+      "rating": "4.5",
+      "product_url": "https://homes.example.in/listing/flat-11"
+    },
+    {
+      "title": "3 BHK Apartment - HSR Layout",
+      "price": "INR 1,12,00,000",
+      "rating": "4.3",
+      "product_url": "https://homes.example.in/listing/flat-12"
+    },
+    {
+      "title": "Studio - Indiranagar",
+      "price": "INR 48,00,000",
+      "rating": "4.1",
+      "product_url": "https://homes.example.in/listing/flat-13"
+    }
+  ]
+}

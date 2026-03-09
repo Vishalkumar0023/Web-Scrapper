@@ -1,0 +1,33 @@
+{
+  "rows": [
+    {
+      "title": "Alpha Backpack",
+      "price": "$31.00",
+      "rating": "4.2",
+      "product_url": "https://shop.example.com/product/101"
+    },
+    {
+      "title": "Beta Backpack",
+      "price": "$35.00",
+      "rating": "4.4",
+      "product_url": "https://shop.example.com/product/102"
+    },
+    {
+      "title": "Gamma Backpack",
+      "price": "$39.00",
+      "rating": "4.1",
+      "product_url": "https://shop.example.com/product/103"
+    },
+    {
+      "title": "Delta Backpack",
+      "price": "$42.50",
+      "rating": "4.7",
+      "product_url": "https://shop.example.com/product/104"
+    }
+  ],
+  "pages_processed": 2,
+  "partial": false,
+  "warnings_contains": [
+    "pagination_load_more_detected"
+  ]
+}

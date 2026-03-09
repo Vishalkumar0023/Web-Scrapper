@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "parse_cases": [
+    {
+      "id": "ecommerce_listing_v1",
+      "html": "ecommerce_listing_v1.html",
+      "base_url": "https://shop.example.com/search?q=running",
+      "expected": "ecommerce_listing_v1.expected.json",
+      "max_rows": 10
+    },
+    {
+      "id": "jobs_directory_v1",
+      "html": "jobs_directory_v1.html",
+      "base_url": "https://jobs.example.com/python",
+      "expected": "jobs_directory_v1.expected.json",
+      "max_rows": 10
+    },
+    {
+      "id": "property_listing_v1",
+      "html": "property_listing_v1.html",
+      "base_url": "https://homes.example.in/search?city=bangalore",
+      "expected": "property_listing_v1.expected.json",
+      "max_rows": 10
+    }
+  ],
+  "full_scrape_cases": [
+    {
+      "id": "load_more_catalog_v1",
+      "start_url": "https://shop.example.com/catalog?page=1",
+      "pages": [
+        {
+          "url": "https://shop.example.com/catalog?page=1",
+          "html": "load_more_catalog_v1.page1.html"
+        },
+        {
+          "url": "https://shop.example.com/catalog?page=2",
+          "html": "load_more_catalog_v1.page2.html"
+        }
+      ],
+      "expected": "load_more_catalog_v1.expected.json",
+      "max_pages": 5,
+      "max_rows": 20
+    },
+    {
+      "id": "next_button_catalog_v1",
+      "start_url": "https://market.example.com/browse?page=1",
+      "pages": [
+        {
+          "url": "https://market.example.com/browse?page=1",
+          "html": "next_button_catalog_v1.page1.html"
+        },
+        {
+          "url": "https://market.example.com/browse?page=2",
+          "html": "next_button_catalog_v1.page2.html"
+        }
+      ],
+      "expected": "next_button_catalog_v1.expected.json",
+      "max_pages": 5,
+      "max_rows": 20
+    }
+  ]
+}

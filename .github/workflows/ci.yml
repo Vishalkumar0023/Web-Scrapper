@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+
+jobs:
+  api:
+    name: API Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    env:
+      DATABASE_URL: sqlite+pysqlite:///./ci.db
+      APP_STORE_BACKEND: postgres
+      APP_QUEUE_BACKEND: memory
+      APP_EMBEDDED_WORKER: false
+      APP_RATE_LIMIT_ENABLED: false
+      APP_AUTH_ENABLED: false
+      APP_STARTUP_CLEANUP_ENABLED: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Migration Smoke Test
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Compile Check
+        run: python -m compileall app
+
+      - name: Unit Tests
+        run: python -m pytest
+
+  api-integration:
+    name: API Integration (Postgres + Redis + Worker)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: webscrapper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d webscrapper"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RUN_INFRA_INTEGRATION_TESTS: "1"
+      INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/webscrapper
+      INTEGRATION_REDIS_URL: redis://localhost:6379/0
+      APP_AUTH_ENABLED: false
+      APP_RATE_LIMIT_ENABLED: false
+      APP_STARTUP_CLEANUP_ENABLED: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Apply Migrations
+        run: alembic -c alembic.ini upgrade head
+
+      - name: Run Integration Test
+        run: python -m pytest tests/test_integration_postgres_redis_worker.py -q
+
+  web:
+    name: Web Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build Web
+        run: pnpm --filter webscrapper-web build

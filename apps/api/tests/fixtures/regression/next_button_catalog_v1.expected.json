@@ -1,0 +1,27 @@
+{
+  "rows": [
+    {
+      "title": "Summit Tent 2P",
+      "price": "$129.00",
+      "rating": "4.5",
+      "product_url": "https://market.example.com/product/201"
+    },
+    {
+      "title": "Summit Tent 3P",
+      "price": "$149.00",
+      "rating": "4.3",
+      "product_url": "https://market.example.com/product/202"
+    },
+    {
+      "title": "Summit Tent 4P",
+      "price": "$179.00",
+      "rating": "4.6",
+      "product_url": "https://market.example.com/product/203"
+    }
+  ],
+  "pages_processed": 2,
+  "partial": false,
+  "warnings_contains": [
+    "pagination_next_detected"
+  ]
+}

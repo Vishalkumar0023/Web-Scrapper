@@ -1,0 +1,105 @@
+{
+  "version": 3,
+  "pages404": true,
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "dynamicRoutes": [
+    {
+      "page": "/jobs/[jobId]",
+      "regex": "^/jobs/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPjobId": "nxtPjobId"
+      },
+      "namedRegex": "^/jobs/(?<nxtPjobId>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/auth",
+      "regex": "^/auth(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/auth(?:/)?$"
+    },
+    {
+      "page": "/exports",
+      "regex": "^/exports(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/exports(?:/)?$"
+    },
+    {
+      "page": "/file-manager",
+      "regex": "^/file\\-manager(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/file\\-manager(?:/)?$"
+    },
+    {
+      "page": "/jobs",
+      "regex": "^/jobs(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/jobs(?:/)?$"
+    },
+    {
+      "page": "/new-scrape",
+      "regex": "^/new\\-scrape(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/new\\-scrape(?:/)?$"
+    },
+    {
+      "page": "/templates",
+      "regex": "^/templates(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/templates(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "RSC",
+    "varyHeader": "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch",
+    "prefetchHeader": "Next-Router-Prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSuffix": ".prefetch.rsc",
+    "prefetchSegmentHeader": "Next-Router-Segment-Prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments"
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  },
+  "rewrites": [
+    {
+      "source": "/api/v1/:path*",
+      "destination": "http://127.0.0.1:8000/api/v1/:path*",
+      "regex": "^/api/v1(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+    },
+    {
+      "source": "/health",
+      "destination": "http://127.0.0.1:8000/health",
+      "regex": "^/health(?:/)?$"
+    }
+  ]
+}

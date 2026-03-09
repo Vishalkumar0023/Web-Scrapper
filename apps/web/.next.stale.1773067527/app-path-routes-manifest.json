@@ -1,0 +1,11 @@
+{
+  "/_not-found/page": "/_not-found",
+  "/auth/page": "/auth",
+  "/file-manager/page": "/file-manager",
+  "/exports/page": "/exports",
+  "/jobs/page": "/jobs",
+  "/new-scrape/page": "/new-scrape",
+  "/templates/page": "/templates",
+  "/page": "/",
+  "/jobs/[jobId]/page": "/jobs/[jobId]"
+}

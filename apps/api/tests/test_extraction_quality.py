@@ -1,4 +1,9 @@
-from app.services.extractor import infer_fields, parse_rows_from_html, transform_rows_for_prompt_schema
+from app.services.extractor import (
+    _merge_structured_rows,
+    infer_fields,
+    parse_rows_from_html,
+    transform_rows_for_prompt_schema,
+)
 
 
 COMPLEX_LISTING_HTML = """
@@ -180,6 +185,25 @@ FLIPKART_MACBOOK_NOISY_HTML = """
 </html>
 """
 
+SMARTPHONE_NOISE_HTML = """
+<html>
+  <body>
+    <section class="results">
+      <div class="item">
+        <a href="https://www.flipkart.com/mobiles-accessories/pr">Mobiles & Accessories</a>
+      </div>
+      <div class="item">
+        <a href="https://www.flipkart.com/oppo-k13-5g-7000mah-80w-supervooc-charger-in-the-box-icy-purple-128-gb/p/itm6f2ebf6d205cf">
+          Bestseller OPPO K13 5G with 7000mAh and 80W SUPERVOOC Charger In-The-Box (Icy Purple, 128 GB)
+        </a>
+        <span class="price">₹18,999</span>
+        <span class="rating">4.5 4,867 Ratings</span>
+      </div>
+    </section>
+  </body>
+</html>
+"""
+
 LAPTOP_DETAILED_METADATA_HTML = """
 <html>
   <body>
@@ -222,6 +246,21 @@ MODEL_CLEANUP_REGRESSION_HTML = """
           Samsung Galaxy Book4 Metal Intel Core i5 13th Gen 1335U - NP750XGJ-KG1IN (16 GB/512 GB SSD/Windows 11 Home/39.62 cm (15.6 inch) Display)
         </a>
         <span class="price">₹72,990</span>
+      </div>
+    </section>
+  </body>
+</html>
+"""
+
+TRUNCATED_SKU_RECOVERY_HTML = """
+<html>
+  <body>
+    <section class="results">
+      <div class="product-card">
+        <a href="https://www.flipkart.com/samsung-galaxy-book4-metal-intel-core-i5-13th-gen-1335u-8-gb-512-gb-ssd-windows-11-home-np750xgj-kg1in-np750xgj-lg1in-np750xgj-lg6in-thin-light-laptop/p/itm1df5212efb9fc">
+          Samsung Galaxy Book4 Metal Intel Core i5 13th Gen 1335U - NP750XGJ-K... (8 GB/512 GB SSD/Windows 11 Home)
+        </a>
+        <span class="price">₹49,790</span>
       </div>
     </section>
   </body>
@@ -277,6 +316,27 @@ SKU_FALLBACK_HTML = """
       <div class="product-card">
         <a href="https://shop.example.com/asus-vivobook-14/p/item222">
           ASUS VivoBook 14 Model Number: UV3402A1234 (16 GB/512 GB SSD/Windows 11 Home)
+        </a>
+        <span class="price">₹64,990</span>
+      </div>
+    </section>
+  </body>
+</html>
+"""
+
+PRICE_ENRICHMENT_HTML = """
+<html>
+  <body>
+    <section class="results">
+      <div class="product-card">
+        <a href="https://shop.example.com/laptop-x/p/item-x">
+          Laptop X (16 GB/512 GB SSD/Windows 11) MRP ₹99,990 Offer Price ₹79,990
+        </a>
+        <span class="price">₹79,990</span>
+      </div>
+      <div class="product-card">
+        <a href="https://shop.example.com/laptop-y/p/item-y">
+          Laptop Y (16 GB/512 GB SSD/Windows 11)
         </a>
         <span class="price">₹64,990</span>
       </div>
@@ -455,7 +515,9 @@ def test_transform_rows_for_structured_product_schema() -> None:
         "product_family",
         "model",
         "parent_product_id",
+        "parent_cluster_id",
         "variant_id",
+        "variant_cluster_id",
         "canonical_product_id",
         "cluster_id",
         "cluster_confidence",
@@ -472,6 +534,11 @@ def test_transform_rows_for_structured_product_schema() -> None:
         "os",
         "is_canonical_name",
         "name_source",
+        "canonical_review_required",
+        "list_price_inr",
+        "effective_price_inr",
+        "discount_percent",
+        "price_confidence",
         "price_inr",
         "rating",
         "review_count",
@@ -488,9 +555,11 @@ def test_transform_rows_for_structured_product_schema() -> None:
     assert first["product_family"] == "MacBook Neo"
     assert first["model"] == "MacBook Neo A18 Pro"
     assert str(first["parent_product_id"]).startswith("pp_")
+    assert str(first["parent_cluster_id"]).startswith("pclu_")
     assert str(first["variant_id"]).startswith("var_")
+    assert str(first["variant_cluster_id"]).startswith("vclu_")
     assert str(first["canonical_product_id"]).startswith("cpv1_")
-    assert str(first["cluster_id"]).startswith("clu_")
+    assert str(first["cluster_id"]).startswith("vclu_")
     assert str(first["global_entity_id"]).startswith("ge_")
     assert 0.55 <= float(first["cluster_confidence"]) <= 0.99
     assert 0.5 <= float(first["match_confidence"]) <= 0.99
@@ -505,6 +574,11 @@ def test_transform_rows_for_structured_product_schema() -> None:
     assert first["os"] == "macOS"
     assert first["is_canonical_name"] is False
     assert first["name_source"] == "marketplace_naming"
+    assert first["canonical_review_required"] is True
+    assert first["list_price_inr"] is None
+    assert first["effective_price_inr"] == 69900
+    assert first["discount_percent"] is None
+    assert 0.6 <= float(first["price_confidence"]) <= 0.99
     assert first["price_inr"] == 69900
     assert first["rating"] is None
     assert first["review_count"] is None
@@ -519,9 +593,11 @@ def test_transform_rows_for_structured_product_schema() -> None:
     second = transformed_rows[1]
     assert second["product_family"] == "MacBook Neo"
     assert str(second["parent_product_id"]).startswith("pp_")
+    assert str(second["parent_cluster_id"]).startswith("pclu_")
     assert str(second["variant_id"]).startswith("var_")
+    assert str(second["variant_cluster_id"]).startswith("vclu_")
     assert str(second["canonical_product_id"]).startswith("cpv1_")
-    assert str(second["cluster_id"]).startswith("clu_")
+    assert str(second["cluster_id"]).startswith("vclu_")
     assert str(second["global_entity_id"]).startswith("ge_")
     assert 0.55 <= float(second["cluster_confidence"]) <= 0.99
     assert 0.5 <= float(second["match_confidence"]) <= 0.99
@@ -536,6 +612,11 @@ def test_transform_rows_for_structured_product_schema() -> None:
     assert second["os"] == "macOS"
     assert second["is_canonical_name"] is False
     assert second["name_source"] == "marketplace_naming"
+    assert second["canonical_review_required"] is True
+    assert second["list_price_inr"] is None
+    assert second["effective_price_inr"] == 79900
+    assert second["discount_percent"] is None
+    assert 0.6 <= float(second["price_confidence"]) <= 0.99
     assert second["price_inr"] == 79900
     assert second["review_count"] is None
     assert second["review_scope"] is None
@@ -546,7 +627,9 @@ def test_transform_rows_for_structured_product_schema() -> None:
         == "https://www.flipkart.com/apple-macbook-neo-a18-pro-2026-pro-8-gb-512-gb-ssd-tahoe-mhfe4hn-a/p/itm97a16be54dbaf"
     )
     assert first["parent_product_id"] == second["parent_product_id"]
+    assert first["parent_cluster_id"] == second["parent_cluster_id"]
     assert first["variant_id"] != second["variant_id"]
+    assert first["variant_cluster_id"] != second["variant_cluster_id"]
     assert first["canonical_product_id"] != second["canonical_product_id"]
     assert first["global_entity_id"] != second["global_entity_id"]
 
@@ -624,6 +707,41 @@ def test_transform_structured_schema_extracts_pre_order_availability_from_raw_te
     assert transformed_rows[1]["availability"] == "pre order"
 
 
+def test_transform_structured_schema_drops_collection_rows_and_cleans_smartphone_titles() -> None:
+    prompt = (
+        "Extract brand, category, model, ram, storage, processor, display, os, "
+        "price_inr, rating, review_count, availability, product_url"
+    )
+    fields = infer_fields(prompt)
+    rows, warnings = parse_rows_from_html(
+        html=SMARTPHONE_NOISE_HTML,
+        base_url="https://www.flipkart.com/search?q=oppo+k13",
+        fields=fields,
+        max_rows=10,
+    )
+    assert warnings == []
+    assert len(rows) == 2
+
+    _new_fields, transformed_rows, transform_warnings = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://www.flipkart.com/search?q=oppo+k13",
+    )
+    assert transform_warnings == ["structured_product_schema_applied"]
+    assert len(transformed_rows) == 1
+
+    row = transformed_rows[0]
+    assert row["brand"] == "Oppo"
+    assert row["product_family"] == "OPPO K13"
+    assert row["model"] == "OPPO K13 5G"
+    assert row["ram"] is None
+    assert row["storage"] == "128 GB"
+    assert row["name_source"] == "brand_prefixed"
+    assert row["canonical_review_required"] is False
+    assert row["price_inr"] == 18999
+
+
 def test_transform_structured_schema_normalizes_model_processor_and_os_details() -> None:
     prompt = (
         "Extract brand, category, model, ram, storage, processor, display, os, "
@@ -660,6 +778,7 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert first["os"] == "macOS Sequoia"
     assert first["is_canonical_name"] is True
     assert first["name_source"] == "catalog_pattern"
+    assert first["canonical_review_required"] is False
     assert first["rating"] == 4.8
     assert first["review_count"] == 2
     assert first["review_scope"] == "variant"
@@ -669,7 +788,7 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert second["product_family"] == "Motobook 60"
     assert second["model"] == "Motobook 60 Pro"
     assert second["sku"] == "PID-COMBBB222"
-    assert second["sku_confidence"] == 0.45
+    assert second["sku_confidence"] == 0.5
     assert second["processor"] == "Intel Core Ultra 5 225H"
     assert second["display"] == "14 inch"
     assert second["os_family"] == "Windows"
@@ -677,6 +796,7 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert second["os"] == "Windows 11 Home"
     assert second["is_canonical_name"] is True
     assert second["name_source"] == "catalog_pattern"
+    assert second["canonical_review_required"] is False
     assert second["review_count"] == 128
     assert second["review_scope"] == "variant"
     assert str(second["review_count_timestamp"]).endswith("Z")
@@ -685,13 +805,14 @@ def test_transform_structured_schema_normalizes_model_processor_and_os_details()
     assert third["product_family"] == "Motobook 14"
     assert third["model"] == "Motobook 14"
     assert third["sku"] == "PID-COMCCC333"
-    assert third["sku_confidence"] == 0.45
+    assert third["sku_confidence"] == 0.5
     assert third["processor"] == "Intel Core 5 Series 2 210H"
     assert third["os_family"] == "Windows"
     assert third["os_version"] == "11"
     assert third["os"] == "Windows 11"
     assert third["is_canonical_name"] is True
     assert third["name_source"] == "catalog_pattern"
+    assert third["canonical_review_required"] is False
 
 
 def test_transform_structured_schema_cleans_model_sku_and_processor_regressions() -> None:
@@ -729,6 +850,7 @@ def test_transform_structured_schema_cleans_model_sku_and_processor_regressions(
     assert first["os"] == "macOS Sequoia"
     assert first["is_canonical_name"] is True
     assert first["name_source"] == "catalog_pattern"
+    assert first["canonical_review_required"] is False
 
     second = transformed_rows[1]
     assert second["model"] == "Galaxy Book4"
@@ -744,6 +866,7 @@ def test_transform_structured_schema_cleans_model_sku_and_processor_regressions(
     assert second["os"] == "Windows 11 Home"
     assert second["is_canonical_name"] is True
     assert second["name_source"] == "catalog_pattern"
+    assert second["canonical_review_required"] is False
 
 
 def test_transform_structured_schema_keeps_apple_m_series_in_model() -> None:
@@ -780,6 +903,7 @@ def test_transform_structured_schema_keeps_apple_m_series_in_model() -> None:
     assert row["os_version"] == "Sequoia"
     assert row["is_canonical_name"] is True
     assert row["name_source"] == "catalog_pattern"
+    assert row["canonical_review_required"] is False
 
 
 def test_transform_structured_schema_assigns_stable_global_entity_across_marketplaces_with_same_sku() -> None:
@@ -814,7 +938,9 @@ def test_transform_structured_schema_assigns_stable_global_entity_across_marketp
     assert first["sku_confidence"] == 0.95
     assert second["sku_confidence"] == 0.95
     assert first["parent_product_id"] == second["parent_product_id"]
+    assert first["parent_cluster_id"] == second["parent_cluster_id"]
     assert first["variant_id"] == second["variant_id"]
+    assert first["variant_cluster_id"] == second["variant_cluster_id"]
     assert first["canonical_product_id"] == second["canonical_product_id"]
     assert first["global_entity_id"] == second["global_entity_id"]
     assert first["cluster_id"] == second["cluster_id"]
@@ -848,11 +974,41 @@ def test_transform_structured_schema_sku_fallback_from_pid_and_model_number_labe
 
     first = transformed_rows[0]
     assert first["sku"] == "PID-LAPX12345Z9"
-    assert first["sku_confidence"] == 0.45
+    assert first["sku_confidence"] == 0.5
 
     second = transformed_rows[1]
     assert second["sku"] == "PART-UV3402A1234"
     assert second["sku_confidence"] == 0.62
+
+
+def test_transform_structured_schema_recovers_truncated_sku_from_url_context() -> None:
+    prompt = (
+        "Extract brand, category, model, ram, storage, processor, display, os, "
+        "price_inr, rating, review_count, availability, product_url"
+    )
+    fields = infer_fields(prompt)
+    rows, warnings = parse_rows_from_html(
+        html=TRUNCATED_SKU_RECOVERY_HTML,
+        base_url="https://www.flipkart.com/search?q=galaxy+book4",
+        fields=fields,
+        max_rows=10,
+    )
+    assert "container_detection_fallback" in warnings
+    assert len(rows) == 1
+
+    _new_fields, transformed_rows, transform_warnings = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://www.flipkart.com/search?q=galaxy+book4",
+    )
+    assert transform_warnings == ["structured_product_schema_applied"]
+    assert len(transformed_rows) == 1
+
+    row = transformed_rows[0]
+    assert row["sku"] == "NP750XGJ-KG1IN"
+    assert row["sku_confidence"] == 0.95
+    assert row["canonical_review_required"] is False
 
 
 def test_transform_structured_schema_entity_ids_are_deterministic_for_same_input() -> None:
@@ -888,10 +1044,78 @@ def test_transform_structured_schema_entity_ids_are_deterministic_for_same_input
     assert [row["parent_product_id"] for row in transformed_rows_1] == [
         row["parent_product_id"] for row in transformed_rows_2
     ]
+    assert [row["parent_cluster_id"] for row in transformed_rows_1] == [
+        row["parent_cluster_id"] for row in transformed_rows_2
+    ]
     assert [row["variant_id"] for row in transformed_rows_1] == [row["variant_id"] for row in transformed_rows_2]
+    assert [row["variant_cluster_id"] for row in transformed_rows_1] == [
+        row["variant_cluster_id"] for row in transformed_rows_2
+    ]
     assert [row["canonical_product_id"] for row in transformed_rows_1] == [
         row["canonical_product_id"] for row in transformed_rows_2
     ]
     assert [row["global_entity_id"] for row in transformed_rows_1] == [
         row["global_entity_id"] for row in transformed_rows_2
     ]
+
+
+def test_transform_structured_schema_extracts_price_enrichment_fields() -> None:
+    prompt = (
+        "Extract brand, category, model, ram, storage, processor, display, os, "
+        "price_inr, rating, review_count, availability, product_url"
+    )
+    fields = infer_fields(prompt)
+    rows, warnings = parse_rows_from_html(
+        html=PRICE_ENRICHMENT_HTML,
+        base_url="https://shop.example.com/search?q=laptop",
+        fields=fields,
+        max_rows=10,
+    )
+    assert warnings == []
+    assert len(rows) == 2
+
+    _new_fields, transformed_rows, transform_warnings = transform_rows_for_prompt_schema(
+        fields=fields,
+        rows=rows,
+        prompt=prompt,
+        page_url="https://shop.example.com/search?q=laptop",
+    )
+    assert transform_warnings == ["structured_product_schema_applied"]
+    assert len(transformed_rows) == 2
+
+    discounted = transformed_rows[0]
+    assert discounted["list_price_inr"] == 99990
+    assert discounted["effective_price_inr"] == 79990
+    assert discounted["price_inr"] == 79990
+    assert float(discounted["discount_percent"]) > 0
+    assert float(discounted["price_confidence"]) >= 0.8
+
+    plain = transformed_rows[1]
+    assert plain["list_price_inr"] is None
+    assert plain["effective_price_inr"] == 64990
+    assert plain["price_inr"] == 64990
+    assert plain["discount_percent"] is None
+    assert float(plain["price_confidence"]) >= 0.6
+
+
+def test_merge_structured_rows_reconciles_price_discount_consistency() -> None:
+    existing = {
+        "category": "laptop",
+        "list_price_inr": 154900,
+        "effective_price_inr": 154900,
+        "price_inr": 154900,
+        "discount_percent": None,
+    }
+    incoming = {
+        "category": "laptop",
+        "list_price_inr": 163240,
+        "effective_price_inr": 154900,
+        "price_inr": 154900,
+        "discount_percent": 5.11,
+    }
+
+    merged = _merge_structured_rows(existing=existing, incoming=incoming)
+    assert merged["list_price_inr"] == 154900
+    assert merged["effective_price_inr"] == 154900
+    assert merged["price_inr"] == 154900
+    assert merged["discount_percent"] is None

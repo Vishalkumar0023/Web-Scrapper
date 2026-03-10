@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import re
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -25,7 +25,9 @@ STRUCTURED_PRODUCT_FIELDS = [
     ("product_family", "text"),
     ("model", "text"),
     ("parent_product_id", "text"),
+    ("parent_cluster_id", "text"),
     ("variant_id", "text"),
+    ("variant_cluster_id", "text"),
     ("canonical_product_id", "text"),
     ("cluster_id", "text"),
     ("cluster_confidence", "number"),
@@ -42,6 +44,11 @@ STRUCTURED_PRODUCT_FIELDS = [
     ("os", "text"),
     ("is_canonical_name", "boolean"),
     ("name_source", "text"),
+    ("canonical_review_required", "boolean"),
+    ("list_price_inr", "number"),
+    ("effective_price_inr", "number"),
+    ("discount_percent", "number"),
+    ("price_confidence", "number"),
     ("price_inr", "number"),
     ("rating", "rating"),
     ("review_count", "number"),
@@ -101,6 +108,7 @@ PROCESSOR_TRAIL_PATTERN = re.compile(
     r"\b(?:Apple\s+M[1-5](?:\s*(?:Pro|Max|Ultra))?|Intel\s+Core\s+[^,()/]+|AMD\s+Ryzen\s+\d+[A-Za-z0-9-]*)\b",
     re.IGNORECASE,
 )
+SKU_CONTEXT_PATTERN = re.compile(r"\b([A-Z0-9]{4,}-[A-Z0-9]{1,16})\b")
 WINDOWS_OS_PATTERN = re.compile(r"\bwindows\s*(11|10)(?:\s*(home|pro|s))?\b", re.IGNORECASE)
 MACOS_OS_PATTERN = re.compile(
     r"\bmac\s*os(?:\s*(sequoia|sonoma|ventura|monterey|big\s*sur))?\b|\bmacos(?:\s*(sequoia|sonoma|ventura|monterey|big\s*sur))?\b",
@@ -116,6 +124,7 @@ TITLE_PREFIX_CLEANUPS = (
     "coming soon",
     "pre order",
     "trending",
+    "bestseller",
 )
 TITLE_TRAILING_METADATA_PATTERN = re.compile(
     r"\b(?:ratings?|reviews?|gb\s*rom|display|camera|processor|battery|ram|rom)\b.*$",
@@ -860,7 +869,13 @@ def transform_rows_for_prompt_schema(
 
     transformed: list[dict[str, object]] = []
     for row in rows:
-        transformed.append(_build_structured_product_row(row=row, page_url=page_url))
+        transformed_row = _build_structured_product_row(row=row, page_url=page_url)
+        if transformed_row is None:
+            continue
+        transformed.append(transformed_row)
+
+    if not transformed:
+        return _with_scores(STRUCTURED_PRODUCT_FIELDS), [], ["structured_product_schema_applied"]
 
     deduped = _dedupe_structured_product_rows(transformed)
     deduped = _enrich_structured_catalog_rows(deduped)
@@ -885,13 +900,54 @@ def _prompt_requests_structured_product_schema(prompt: str | None) -> bool:
     return required_hits >= 3 and has_price_inr and has_product_url
 
 
-def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict[str, object]:
+def _should_drop_non_product_row(
+    *,
+    title: str,
+    source_text: str,
+    product_url: str,
+    raw_price: object,
+    raw_rating: object,
+) -> bool:
+    if not product_url:
+        return False
+
+    path = urlparse(product_url).path.lower().rstrip("/")
+    if not path.endswith("/pr"):
+        return False
+
+    price = _extract_price_inr(raw_price)
+    rating = _extract_numeric_rating(raw_rating)
+    if price is not None or rating is not None:
+        return False
+
+    normalized_title = _clean_text(title).lower()
+    generic_collection = bool(
+        re.fullmatch(
+            r"(mobiles?|mobile phones?|computers?|laptops?|electronics?|tablets?)(?:\s*&\s*[a-z ]+)?",
+            normalized_title,
+        )
+    )
+    has_product_specs = bool(
+        re.search(r"\b(\d+\s*(gb|tb|mah|inch|cm)|\d+\s*w|ratings?|reviews?)\b", source_text.lower())
+    )
+    return generic_collection or not has_product_specs
+
+
+def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict[str, object] | None:
     raw_title = str(row.get("title", "") or row.get("name", "")).strip()
     source_text = str(row.get("raw_text", "")).strip()
     title = _clean_product_title(raw_title)
     raw_product_url = str(row.get("product_url", "") or row.get("url", "") or row.get("link", "")).strip()
     product_url = _canonical_product_url(raw_product_url)
     slug = _product_slug_from_url(product_url)
+    if _should_drop_non_product_row(
+        title=title,
+        source_text=source_text,
+        product_url=product_url,
+        raw_price=row.get("price"),
+        raw_rating=row.get("rating"),
+    ):
+        return None
 
     brand = _extract_brand(title=title, slug=slug)
     category = _infer_category(title=title, slug=slug, page_url=page_url)
@@ -904,13 +960,33 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
     )
     model = _extract_model(title=title, brand=brand, processor=processor, sku=sku)
     product_family = _extract_product_family(model=model, brand=brand)
+    sku, sku_confidence = _calibrate_sku_with_context(
+        sku=sku,
+        sku_confidence=sku_confidence,
+        title=title,
+        slug=slug,
+        source_text=source_text,
+        raw_product_url=raw_product_url,
+        brand=brand,
+        model=model,
+        product_family=product_family,
+    )
     is_canonical_name, name_source = _infer_name_canonicality(
         title=title,
         brand=brand,
         product_family=product_family,
         model=model,
     )
+    canonical_review_required = _infer_canonical_review_required(
+        brand=brand,
+        product_family=product_family,
+        model=model,
+        is_canonical_name=is_canonical_name,
+        name_source=name_source,
+    )
     ram, storage = _extract_memory_specs(title=title, slug=slug, source_text=source_text)
+    ram = _none_if_blank(ram)
+    storage = _none_if_blank(storage)
     display = _extract_display(title=title, slug=slug, source_text=source_text)
     os_family, os_version = _extract_os_parts(
         title=title,
@@ -921,6 +997,15 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
     )
     os_name = _compose_os_label(os_family=os_family, os_version=os_version)
     price_inr = _extract_price_inr(row.get("price"))
+    list_price_inr, effective_price_inr, discount_percent, price_confidence = _extract_price_enrichment(
+        raw_price_value=row.get("price"),
+        source_text=source_text or raw_title,
+        category=category,
+    )
+    if price_inr is None:
+        price_inr = effective_price_inr
+    if effective_price_inr is None:
+        effective_price_inr = price_inr
     rating = _extract_numeric_rating(row.get("rating"))
     if rating is None:
         rating = _extract_numeric_rating_from_text(source_text or raw_title)
@@ -942,7 +1027,9 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
         "product_family": product_family,
         "model": model,
         "parent_product_id": None,
+        "parent_cluster_id": None,
         "variant_id": None,
+        "variant_cluster_id": None,
         "canonical_product_id": None,
         "cluster_id": None,
         "cluster_confidence": None,
@@ -959,6 +1046,11 @@ def _build_structured_product_row(row: dict[str, object], page_url: str) -> dict
         "os": os_name,
         "is_canonical_name": is_canonical_name,
         "name_source": name_source,
+        "canonical_review_required": canonical_review_required,
+        "list_price_inr": list_price_inr,
+        "effective_price_inr": effective_price_inr,
+        "discount_percent": discount_percent,
+        "price_confidence": price_confidence,
         "price_inr": price_inr,
         "rating": rating,
         "review_count": review_count,
@@ -1004,7 +1096,9 @@ def _merge_structured_rows(existing: dict[str, object], incoming: dict[str, obje
         "product_family",
         "model",
         "parent_product_id",
+        "parent_cluster_id",
         "variant_id",
+        "variant_cluster_id",
         "canonical_product_id",
         "cluster_id",
         "cluster_confidence",
@@ -1021,6 +1115,11 @@ def _merge_structured_rows(existing: dict[str, object], incoming: dict[str, obje
         "os",
         "is_canonical_name",
         "name_source",
+        "canonical_review_required",
+        "list_price_inr",
+        "effective_price_inr",
+        "discount_percent",
+        "price_confidence",
         "price_inr",
         "rating",
         "review_count",
@@ -1053,13 +1152,49 @@ def _merge_structured_rows(existing: dict[str, object], incoming: dict[str, obje
 
         if _is_blank_value(existing_value) and not _is_blank_value(incoming_value):
             merged[field] = incoming_value
+    _reconcile_merged_price_fields(merged)
     return merged
+
+
+def _reconcile_merged_price_fields(row: dict[str, object]) -> None:
+    category = row.get("category") if isinstance(row.get("category"), str) else "product"
+    list_price = _extract_price_inr(row.get("list_price_inr"))
+    effective_price = _extract_price_inr(row.get("effective_price_inr"))
+    price_inr = _extract_price_inr(row.get("price_inr"))
+
+    if effective_price is None:
+        effective_price = price_inr
+    if price_inr is None:
+        price_inr = effective_price
+    if effective_price is None and list_price is not None:
+        effective_price = list_price
+    if price_inr is None and effective_price is not None:
+        price_inr = effective_price
+
+    list_price, effective_price = _validate_price_bounds(
+        list_price=list_price,
+        effective_price=effective_price,
+        category=category,
+    )
+
+    if effective_price is None:
+        effective_price = price_inr
+    if price_inr is None:
+        price_inr = effective_price
+
+    discount_percent = _calculate_discount_percent(list_price=list_price, effective_price=effective_price)
+
+    row["list_price_inr"] = list_price
+    row["effective_price_inr"] = effective_price
+    row["price_inr"] = price_inr
+    row["discount_percent"] = discount_percent
 
 
 def _enrich_structured_catalog_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     if not rows:
         return rows
 
+    parent_cluster_registry: dict[str, str] = {}
     cluster_registry: dict[str, str] = {}
     global_registry: dict[str, str] = {}
     sku_overrides = _build_sku_identity_overrides(rows)
@@ -1077,9 +1212,14 @@ def _enrich_structured_catalog_rows(rows: list[dict[str, object]]) -> list[dict[
         variant_id = _stable_identity_id("var", variant_key)
         canonical_product_id = _stable_identity_id("cpv1", canonical_key)
 
+        parent_cluster_id = parent_cluster_registry.get(parent_key)
+        if not parent_cluster_id:
+            parent_cluster_id = _stable_identity_id("pclu", parent_key)
+            parent_cluster_registry[parent_key] = parent_cluster_id
+
         cluster_id = cluster_registry.get(cluster_key)
         if not cluster_id:
-            cluster_id = _stable_identity_id("clu", cluster_key)
+            cluster_id = _stable_identity_id("vclu", cluster_key)
             cluster_registry[cluster_key] = cluster_id
 
         global_entity_id = global_registry.get(global_key)
@@ -1088,8 +1228,11 @@ def _enrich_structured_catalog_rows(rows: list[dict[str, object]]) -> list[dict[
             global_registry[global_key] = global_entity_id
 
         enriched["parent_product_id"] = parent_product_id
+        enriched["parent_cluster_id"] = parent_cluster_id
         enriched["variant_id"] = variant_id
+        enriched["variant_cluster_id"] = cluster_id
         enriched["canonical_product_id"] = canonical_product_id
+        # Backward-compatible alias for variant-level cluster id.
         enriched["cluster_id"] = cluster_id
         enriched["cluster_confidence"] = cluster_confidence
         enriched["global_entity_id"] = global_entity_id
@@ -1391,6 +1534,13 @@ def _safe_float(value: object) -> float | None:
         return None
 
 
+def _none_if_blank(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = _clean_text(value)
+    return cleaned or None
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     if value < low:
         return low
@@ -1426,15 +1576,25 @@ def _product_slug_from_url(product_url: str) -> str:
 
 
 def _extract_brand(title: str, slug: str) -> str:
+    generic_tokens = {
+        "mobiles",
+        "mobile",
+        "accessories",
+        "computers",
+        "laptops",
+        "electronics",
+        "bestseller",
+        "trending",
+    }
     candidate = ""
     if title:
         first = title.split()[0]
-        if first and not first[0].isdigit():
+        if first and not first[0].isdigit() and first.lower() not in generic_tokens:
             candidate = first
 
     if not candidate and slug:
         first_slug = slug.split("-", 1)[0]
-        if first_slug and first_slug.isalpha():
+        if first_slug and first_slug.isalpha() and first_slug.lower() not in generic_tokens:
             candidate = first_slug
 
     if not candidate:
@@ -1482,6 +1642,12 @@ def _extract_model(title: str, brand: str, processor: str | None = None, sku: st
     model = PROCESSOR_TRAIL_PATTERN.sub("", model)
     if processor:
         model = re.sub(re.escape(processor), "", model, flags=re.IGNORECASE)
+
+    # Remove promotional tails common in marketplace phone titles.
+    model = re.sub(r"\bwith\b.*$", "", model, flags=re.IGNORECASE)
+    model = re.sub(r"\b\d{3,5}\s*mAh\b.*$", "", model, flags=re.IGNORECASE)
+    model = re.sub(r"\b\d{2,3}\s*W\b.*$", "", model, flags=re.IGNORECASE)
+    model = re.sub(r"\b(?:supervooc|charger|in[-\s]?the[-\s]?box)\b.*$", "", model, flags=re.IGNORECASE)
 
     model = re.sub(r"\s*[-|:]\s*\(\s*$", "", model)
     if model.count("(") > model.count(")"):
@@ -1623,6 +1789,232 @@ def _extract_sku_with_confidence(
                 return normalized, 0.45
 
     return None, None
+
+
+def _calibrate_sku_with_context(
+    *,
+    sku: str | None,
+    sku_confidence: float | None,
+    title: str,
+    slug: str,
+    source_text: str,
+    raw_product_url: str,
+    brand: str,
+    model: str,
+    product_family: str | None,
+) -> tuple[str | None, float | None]:
+    recovered_sku, recovered_confidence = _recover_sku_from_context(
+        sku=sku,
+        sku_confidence=sku_confidence,
+        title=title,
+        source_text=source_text,
+        raw_product_url=raw_product_url,
+    )
+    if recovered_sku:
+        sku = recovered_sku
+        sku_confidence = recovered_confidence
+
+    if not sku or sku_confidence is None:
+        return sku, sku_confidence
+
+    normalized_sku = _normalize_sku(sku)
+    if not normalized_sku:
+        return None, None
+
+    confidence = float(sku_confidence)
+    compact_sku = re.sub(r"[^a-z0-9]", "", normalized_sku.lower())
+    prefix, _, suffix = normalized_sku.partition("-")
+    compact_sku_suffix = re.sub(r"[^a-z0-9]", "", suffix.lower()) if suffix else compact_sku
+    compact_presence_target = (
+        compact_sku_suffix if prefix in {"PID", "PART"} and compact_sku_suffix else compact_sku
+    )
+    haystack = f"{title} {source_text} {slug} {raw_product_url} {brand} {model} {product_family or ''}".lower()
+    compact_haystack = re.sub(r"[^a-z0-9]", "", haystack)
+
+    if compact_presence_target and compact_presence_target not in compact_haystack:
+        confidence -= 0.35 if confidence < 0.8 else 0.2
+
+    parsed_url = urlparse(raw_product_url) if raw_product_url else None
+    query_map = parse_qs(parsed_url.query) if parsed_url else {}
+    path = parsed_url.path.lower() if parsed_url else ""
+    has_pid = any(query_map.get(key) for key in ("pid", "product_id"))
+
+    if normalized_sku.startswith("PID-"):
+        if has_pid:
+            matched = False
+            for key in ("pid", "product_id"):
+                for value in query_map.get(key, []):
+                    compact_value = re.sub(r"[^a-z0-9]", "", value.lower())
+                    if compact_value and compact_sku_suffix and compact_value in compact_sku_suffix:
+                        matched = True
+                        break
+                if matched:
+                    break
+            confidence += 0.05 if matched else -0.25
+        else:
+            confidence -= 0.25
+    elif normalized_sku.startswith("PART-"):
+        if not PART_NUMBER_LABEL_PATTERN.search(f"{source_text} {title}"):
+            confidence -= 0.2
+    else:
+        # Slug-derived part numbers should be visible in URL path.
+        if compact_sku and compact_sku not in re.sub(r"[^a-z0-9]", "", path):
+            confidence -= 0.1
+
+    # Weak alignment between model/family tokens and URL path usually indicates bad fallback SKU.
+    model_tokens = [token for token in _model_signature(model).split("-") if token]
+    family_tokens = [token for token in _identity_part(product_family).split() if token]
+    reference_tokens = (model_tokens[:3] + family_tokens[:2])[:4]
+    if reference_tokens and path:
+        path_tokens = re.findall(r"[a-z0-9]+", path)
+        if not any(token in path_tokens for token in reference_tokens):
+            confidence -= 0.08
+
+    confidence = _clamp(confidence, 0.0, 0.99)
+    if confidence < 0.4:
+        return None, None
+
+    return normalized_sku, round(confidence, 2)
+
+
+def _recover_sku_from_context(
+    *,
+    sku: str | None,
+    sku_confidence: float | None,
+    title: str,
+    source_text: str,
+    raw_product_url: str,
+) -> tuple[str | None, float | None]:
+    current = _normalize_sku(sku) if sku else None
+    base_confidence = float(sku_confidence) if isinstance(sku_confidence, (int, float)) else None
+
+    left = ""
+    right = ""
+    if current:
+        left, _, right = current.partition("-")
+
+    upper_text = _clean_text(f"{title} {source_text}").upper()
+    url_text = unquote(raw_product_url).upper() if raw_product_url else ""
+    context = f"{upper_text} {url_text}"
+
+    best_candidate = current
+    best_score = float("-inf")
+    best_confidence = base_confidence
+
+    def consider(candidate: str, source: str) -> None:
+        nonlocal best_candidate, best_score, best_confidence
+
+        normalized = _normalize_sku(candidate)
+        if not normalized:
+            return
+        cand_left, _, cand_right = normalized.partition("-")
+        if not cand_left or not cand_right:
+            return
+        if not _is_plausible_sku_parts(cand_left, cand_right):
+            return
+
+        # If we already have a SKU, only accept strict extensions of the same left token.
+        if current:
+            if normalized == current:
+                score = 0.01
+                if score > best_score:
+                    best_candidate = normalized
+                    best_score = score
+                    best_confidence = base_confidence
+                return
+
+            if not left or cand_left != left:
+                return
+            if not right or len(cand_right) <= len(right):
+                return
+            if not cand_right.startswith(right):
+                return
+
+        score = 0.0
+        source_confidence = 0.9
+        if source == "title":
+            score += 2.5
+            source_confidence = 0.95
+        elif source == "url":
+            score += 2.0
+            source_confidence = 0.92
+        else:
+            source_confidence = 0.88
+
+        score += min(len(cand_right), 12) / 12.0
+        if current and left and cand_left == left and right and len(cand_right) > len(right):
+            score += 1.8
+            source_confidence = max(source_confidence, 0.95)
+
+        # Prefer richer suffixes over truncated marketplace variants.
+        if len(cand_right) <= 2 and len(cand_left) >= 8 and any(ch.isdigit() for ch in cand_left):
+            score -= 0.8
+            source_confidence -= 0.08
+
+        if score > best_score:
+            best_score = score
+            best_candidate = normalized
+            if base_confidence is None:
+                best_confidence = source_confidence
+            else:
+                best_confidence = max(base_confidence, source_confidence)
+
+    # Direct token candidates from title/source text and URL.
+    for match in SKU_CONTEXT_PATTERN.finditer(upper_text):
+        consider(match.group(1), "title")
+    for match in SKU_CONTEXT_PATTERN.finditer(url_text):
+        consider(match.group(1), "url")
+
+    # URL path segment reconstruction: .../np750xgj-kg1in-...
+    if raw_product_url:
+        parsed = urlparse(raw_product_url)
+        path_tokens = [token for token in re.findall(r"[a-z0-9]+", parsed.path.lower()) if token]
+        for index in range(len(path_tokens) - 1):
+            left_token = path_tokens[index].upper()
+            right_token = path_tokens[index + 1].upper()
+            if not _is_plausible_sku_parts(left_token, right_token):
+                continue
+            if left and left_token == left:
+                if not right or right_token.startswith(right):
+                    consider(f"{left_token}-{right_token}", "url")
+            elif not current and len(right_token) >= 3:
+                consider(f"{left_token}-{right_token}", "url")
+
+    if not best_candidate:
+        return None, None
+    if current and best_candidate == current:
+        return current, base_confidence
+    if best_confidence is None:
+        best_confidence = 0.88
+    return best_candidate, round(_clamp(best_confidence, 0.0, 0.99), 2)
+
+
+def _is_plausible_sku_parts(left: str, right: str) -> bool:
+    if len(left) < 4 or len(right) < 1:
+        return False
+    if not re.search(r"[A-Z]", left) or not re.search(r"\d", left):
+        return False
+    stopwords = {
+        "WINDOWS",
+        "MACOS",
+        "INTEL",
+        "APPLE",
+        "CORE",
+        "ULTRA",
+        "SERIES",
+        "SSD",
+        "HDD",
+        "DISPLAY",
+        "HOME",
+        "PRO",
+        "AIR",
+        "BOOK",
+        "LAPTOP",
+        "MODEL",
+    }
+    if left in stopwords:
+        return False
+    return True
 
 
 def _normalize_sku(value: str) -> str:
@@ -1859,6 +2251,162 @@ def _extract_price_inr(value: object) -> int | None:
     return int(digits)
 
 
+def _extract_price_enrichment(
+    *,
+    raw_price_value: object,
+    source_text: str,
+    category: str,
+) -> tuple[int | None, int | None, float | None, float | None]:
+    effective_price = _extract_price_inr(raw_price_value)
+    source_amounts = _parse_inr_amounts_from_text(source_text)
+    list_price: int | None = None
+
+    if effective_price is None and source_amounts:
+        effective_price = min(source_amounts)
+
+    mrp_hint = _extract_keyword_price(source_text, keywords=("mrp", "original", "was", "list price"))
+    deal_hint = _extract_keyword_price(source_text, keywords=("offer", "deal", "sale", "now"))
+    if mrp_hint is not None:
+        list_price = mrp_hint
+    if effective_price is None and deal_hint is not None:
+        effective_price = deal_hint
+
+    if source_amounts:
+        max_amount = max(source_amounts)
+        min_amount = min(source_amounts)
+        if effective_price is None:
+            effective_price = min_amount
+        if max_amount > (effective_price or 0):
+            list_price = max(list_price or 0, max_amount)
+
+    if effective_price is None and list_price is not None:
+        effective_price = list_price
+
+    list_price, effective_price = _validate_price_bounds(
+        list_price=list_price,
+        effective_price=effective_price,
+        category=category,
+    )
+    discount_percent = _calculate_discount_percent(list_price=list_price, effective_price=effective_price)
+    price_confidence = _calculate_price_confidence(
+        raw_price_value=raw_price_value,
+        source_text=source_text,
+        list_price=list_price,
+        effective_price=effective_price,
+        discount_percent=discount_percent,
+        source_amounts=source_amounts,
+    )
+
+    if effective_price is None and list_price is None:
+        return None, None, None, None
+
+    return list_price, effective_price, discount_percent, price_confidence
+
+
+def _parse_inr_amounts_from_text(text: str) -> list[int]:
+    if not text:
+        return []
+
+    values: list[int] = []
+    seen: set[int] = set()
+    for match in re.finditer(r"₹\s*([\d,]{2,})", text):
+        numeric = _extract_price_inr(match.group(1))
+        if numeric is None or numeric in seen:
+            continue
+        seen.add(numeric)
+        values.append(numeric)
+    return values
+
+
+def _extract_keyword_price(text: str, keywords: tuple[str, ...]) -> int | None:
+    if not text:
+        return None
+
+    lower = text.lower()
+    for keyword in keywords:
+        idx = lower.find(keyword)
+        if idx < 0:
+            continue
+        snippet = text[max(0, idx - 20) : idx + 120]
+        match = re.search(r"₹\s*([\d,]{2,})", snippet)
+        if not match:
+            continue
+        value = _extract_price_inr(match.group(1))
+        if value is not None:
+            return value
+    return None
+
+
+def _validate_price_bounds(
+    *,
+    list_price: int | None,
+    effective_price: int | None,
+    category: str,
+) -> tuple[int | None, int | None]:
+    category_ranges: dict[str, tuple[int, int]] = {
+        "laptop": (15000, 700000),
+        "smartphone": (3000, 300000),
+        "audio": (300, 200000),
+        "product": (100, 2_000_000),
+    }
+    min_price, max_price = category_ranges.get(category, category_ranges["product"])
+
+    if effective_price is not None and (effective_price < min_price or effective_price > max_price):
+        effective_price = None
+    if list_price is not None and (list_price < min_price or list_price > max_price):
+        list_price = None
+
+    if list_price is not None and effective_price is not None:
+        if list_price < effective_price or list_price > effective_price * 5:
+            list_price = None
+
+    return list_price, effective_price
+
+
+def _calculate_discount_percent(*, list_price: int | None, effective_price: int | None) -> float | None:
+    if list_price is None or effective_price is None:
+        return None
+    if list_price <= 0 or effective_price <= 0 or list_price <= effective_price:
+        return None
+    discount = ((list_price - effective_price) / list_price) * 100
+    if discount <= 0 or discount > 95:
+        return None
+    return round(discount, 2)
+
+
+def _calculate_price_confidence(
+    *,
+    raw_price_value: object,
+    source_text: str,
+    list_price: int | None,
+    effective_price: int | None,
+    discount_percent: float | None,
+    source_amounts: list[int],
+) -> float | None:
+    if effective_price is None and list_price is None:
+        return None
+
+    score = 0.0
+    if effective_price is not None:
+        score += 0.62
+    if list_price is not None:
+        score += 0.16
+    if discount_percent is not None:
+        score += 0.12
+    if len(source_amounts) >= 2:
+        score += 0.05
+    if isinstance(raw_price_value, str) and "₹" in raw_price_value:
+        score += 0.06
+    if source_text and "₹" in source_text:
+        score += 0.04
+
+    if list_price is not None and effective_price is not None and list_price < effective_price:
+        score -= 0.25
+
+    score = _clamp(score, 0.35, 0.99)
+    return round(score, 2)
+
+
 def _extract_int_count(value: object) -> int | None:
     if value is None:
         return None
@@ -1979,10 +2527,31 @@ def _infer_name_canonicality(
         return False, "marketplace_title"
     if brand.lower() == "apple" and re.search(r"\bmacbook\s+neo\b", normalized_model, flags=re.IGNORECASE):
         return False, "marketplace_naming"
-    if brand and normalized_model.lower().startswith(brand.lower()):
-        return False, "brand_prefixed"
+    if brand and normalized_model.lower().startswith(f"{brand.lower()} "):
+        return True, "brand_prefixed"
 
     return True, "normalized_title"
+
+
+def _infer_canonical_review_required(
+    *,
+    brand: str,
+    product_family: str | None,
+    model: str,
+    is_canonical_name: bool | None,
+    name_source: str | None,
+) -> bool:
+    if is_canonical_name is False:
+        return True
+    if name_source in {"marketplace_naming", "marketplace_title"}:
+        return True
+
+    family_model = f"{product_family or ''} {model}".lower()
+    if brand.lower() == "apple" and "macbook neo" in family_model:
+        return True
+    if re.search(r"\b(neo|concept|edition|special)\b", family_model) and name_source != "catalog_pattern":
+        return True
+    return False
 
 
 def _infer_review_scope(
